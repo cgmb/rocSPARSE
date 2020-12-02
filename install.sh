@@ -21,6 +21,9 @@ function display_help()
   echo "    [--static] build static library"
 }
 
+# Find project root directory
+main=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+
 # This function is helpful for dockerfiles that do not have sudo installed, but the default user is root
 # true is a system command that completes successfully, function returns success
 # prereq: ${ID} must be defined before calling
@@ -207,6 +210,11 @@ install_packages( )
   esac
 }
 
+# given a relative path, returns the absolute path
+make_absolute_path( ) {
+  (cd "$1" && pwd -P)
+}
+
 # #################################################
 # Pre-requisites check
 # #################################################
@@ -244,6 +252,7 @@ build_static=false
 install_prefix=rocsparse-install
 rocm_path=/opt/rocm
 build_relocatable=false
+build_docs=false
 
 # #################################################
 # Parameter parsing
@@ -252,7 +261,7 @@ build_relocatable=false
 # check if we have a modern version of getopt that can handle whitespace and long parameters
 getopt -T
 if [[ $? -eq 4 ]]; then
-  GETOPT_PARSE=$(getopt --name "${0}" --longoptions help,install,clients,dependencies,debug,hip-clang,static,relocatable --options hicdgr -- "$@")
+  GETOPT_PARSE=$(getopt --name "${0}" --longoptions help,install,clients,dependencies,debug,hip-clang,static,relocatable,docs --options hicdgr -- "$@")
 else
   echo "Need a new version of getopt"
   exit 1
@@ -295,6 +304,9 @@ while true; do
     --prefix)
         install_prefix=${2}
         shift 2 ;;
+    --docs)
+        build_docs=true
+        shift ;;
     --) shift ; break ;;
     *)  echo "Unexpected command line parameter received; aborting";
         exit 1
@@ -309,10 +321,12 @@ printf "\033[32mCreating project build directory in: \033[33m${build_dir}\033[0m
 # prep
 # #################################################
 # ensure a clean build environment
-if [[ "${build_release}" == true ]]; then
-  rm -rf ${build_dir}/release
+if [[ "${build_docs}" == true ]]; then
+  rm -rf -- "${build_dir}/docs"
+elif [[ "${build_type}" == Release ]]; then
+  rm -rf -- "${build_dir}/release"
 else
-  rm -rf ${build_dir}/debug
+  rm -rf -- "${build_dir}/debug"
 fi
 
 # Default cmake executable is called cmake
@@ -358,6 +372,27 @@ if [[ "${build_relocatable}" == true ]]; then
     export PATH=${rocm_path}/bin:${PATH}
 else
     export PATH=${PATH}:/opt/rocm/bin
+fi
+
+mkdir -p "$build_dir"
+
+# build documentation
+if [[ "${build_docs}" == true ]]; then
+  container_name="build_$(head -c 10 /dev/urandom | base32)"
+  docs_build_command='cp -r /mnt/rocsparse /home/docs/ && /home/docs/rocsparse/docs/run_doc.sh'
+  docker build -t rocsparse:docs -f "$main/docker/dockerfile-docs" "$main/docker"
+  docker run -v "$main:/mnt/rocsparse:ro" --name "$container_name" rocsparse:docs /bin/sh -c "$docs_build_command"
+  docker cp "$container_name:/home/docs/rocsparse/docs/source/_build" "$main/docs/"
+  docker cp "$container_name:/home/docs/rocsparse/docs/docBin" "$main/docs/"
+  mkdir -p "$build_dir/docs"
+  ln -sr "$main/docs/docBin" "$build_dir/docs/doxygen"
+  ln -sr "$main/docs/_build" "$build_dir/docs/sphinx"
+  absolute_build_dir=$(make_absolute_path "$build_dir")
+  set +x
+  echo 'Documentation Built:'
+  echo "HTML: file://$absolute_build_dir/docs/sphinx/html/index.html"
+  echo "PDF:  file://$absolute_build_dir/docs/sphinx/latex/rocSOLVER.pdf"
+  exit
 fi
 
 pushd .
